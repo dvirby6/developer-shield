@@ -126,6 +126,14 @@ export function FileIcon(props: IconProps) {
   )
 }
 
+export function FolderIcon(props: IconProps) {
+  return (
+    <svg {...baseProps} {...props}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
+    </svg>
+  )
+}
+
 export function TerminalIcon(props: IconProps) {
   return (
     <svg {...baseProps} {...props}>

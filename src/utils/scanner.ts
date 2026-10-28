@@ -5,6 +5,9 @@
  * sent over the network.
  */
 
+import type { DirEntry } from '@tauri-apps/plugin-fs'
+import type { IgnoreRule } from './gitignore'
+
 export type SecretKind =
   | 'openai'
   | 'github'
@@ -278,3 +281,390 @@ export function scanText(text: string, file = 'inline'): ScanResult {
 export function scanFiles(files: ScanFile[]): ScanResult[] {
   return files.map((file) => scanText(file.content, file.path))
 }
+
+/* -------------------------------------------------------------------------- */
+/* Local directory scanning (Tauri desktop only)                              */
+/* -------------------------------------------------------------------------- */
+
+/** A file row shown in the dashboard. Contents are dropped after scanning. */
+export interface ScannedFile {
+  /** Path relative to the selected workspace root, posix separators. */
+  path: string
+  language: string
+  /** Whole minutes since the file was modified, when the platform reports it. */
+  touchedMinutesAgo?: number
+}
+
+export interface DirectoryScanProgress {
+  processedFiles: number
+  totalFiles: number
+  currentPath: string
+}
+
+export interface DirectoryScanOptions {
+  signal?: AbortSignal
+  /** Maximum number of files to inspect. Defaults to 2000. */
+  maxFiles?: number
+  /** Maximum size of a single file in bytes. Defaults to 512 KiB. */
+  maxFileBytes?: number
+  /** Maximum total number of bytes read. Defaults to 32 MiB. */
+  maxTotalBytes?: number
+  /** Maximum directory depth. Defaults to 24. */
+  maxDepth?: number
+  onProgress?: (progress: DirectoryScanProgress) => void
+}
+
+export interface DirectoryScanOutcome {
+  files: ScannedFile[]
+  results: ScanResult[]
+  scannedFiles: number
+  skippedFiles: number
+  /** True when the file-count or byte budget stopped the walk early. */
+  truncated: boolean
+}
+
+const DEFAULT_MAX_FILES = 2_000
+const DEFAULT_MAX_FILE_BYTES = 512 * 1024
+const DEFAULT_MAX_TOTAL_BYTES = 32 * 1024 * 1024
+const DEFAULT_MAX_DEPTH = 24
+const READ_CONCURRENCY = 8
+
+/** Directories that never contain project source worth scanning. */
+const EXCLUDED_DIRS = new Set([
+  '.git',
+  '.gradle',
+  '.next',
+  '.nuxt',
+  '.pnpm-store',
+  '.terraform',
+  '.turbo',
+  '.venv',
+  '.yarn',
+  'Pods',
+  'bower_components',
+  'build',
+  'coverage',
+  'dist',
+  'node_modules',
+  'target',
+  'vendor',
+  'venv',
+  '__pycache__',
+])
+
+const BINARY_EXTENSIONS = new Set([
+  '7z', 'ai', 'avif', 'avi', 'bin', 'bmp', 'bz2', 'class', 'dat', 'db',
+  'dll', 'dylib', 'eot', 'exe', 'fig', 'flac', 'gif', 'gz', 'ico', 'jar',
+  'jpeg', 'jpg', 'lockb', 'mkv', 'mov', 'mp3', 'mp4', 'ogg', 'otf', 'pdf',
+  'png', 'psd', 'rar', 'sketch', 'so', 'sqlite', 'sqlite3', 'tar', 'tiff',
+  'ttf', 'war', 'wasm', 'wav', 'webm', 'webp', 'woff', 'woff2', 'xz', 'zip',
+])
+
+const LANGUAGE_BY_EXTENSION: Record<string, string> = {
+  bash: 'SH',
+  c: 'C',
+  cc: 'C++',
+  cjs: 'JS',
+  cpp: 'C++',
+  cs: 'C#',
+  css: 'CSS',
+  cts: 'TS',
+  env: 'ENV',
+  go: 'GO',
+  gql: 'GQL',
+  graphql: 'GQL',
+  h: 'H',
+  hpp: 'C++',
+  html: 'HTML',
+  java: 'JAVA',
+  js: 'JS',
+  json: 'JSON',
+  jsonc: 'JSON',
+  jsx: 'JSX',
+  kt: 'KT',
+  kts: 'KT',
+  less: 'LESS',
+  md: 'MD',
+  mdx: 'MDX',
+  mjs: 'JS',
+  mts: 'TS',
+  php: 'PHP',
+  ps1: 'PS1',
+  py: 'PY',
+  rb: 'RB',
+  rs: 'RS',
+  sass: 'SASS',
+  scss: 'SCSS',
+  sh: 'SH',
+  sql: 'SQL',
+  swift: 'SWIFT',
+  svg: 'SVG',
+  toml: 'TOML',
+  ts: 'TS',
+  tsx: 'TSX',
+  vue: 'VUE',
+  xml: 'XML',
+  yaml: 'YAML',
+  yml: 'YAML',
+  zsh: 'SH',
+}
+
+/** Best-effort language label for the dashboard table. */
+export function languageForPath(path: string): string {
+  const name = path.split(/[\\/]/).pop() ?? path
+
+  if (name === '.env' || name.startsWith('.env.') || name.endsWith('.env')) {
+    return 'ENV'
+  }
+
+  const extension = name.includes('.') ? name.split('.').pop()?.toLowerCase() : ''
+  if (!extension) return 'TEXT'
+
+  return LANGUAGE_BY_EXTENSION[extension] ?? extension.toUpperCase().slice(0, 6)
+}
+
+function isBinaryPath(name: string): boolean {
+  const extension = name.includes('.') ? name.split('.').pop()?.toLowerCase() : ''
+  return extension !== undefined && BINARY_EXTENSIONS.has(extension)
+}
+
+function joinNativePath(base: string, ...parts: string[]): string {
+  const separator = base.includes('\\') ? '\\' : '/'
+  const trimmed = base.replace(/[\\/]+$/, '')
+  return [trimmed, ...parts].join(separator)
+}
+
+function abortError(): Error {
+  const error = new Error('Scan cancelled')
+  error.name = 'AbortError'
+  return error
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError()
+}
+
+interface ScannedCandidate {
+  absolute: string
+  relative: string
+}
+
+async function collectScanCandidates(
+  root: string,
+  signal: AbortSignal | undefined,
+  maxFiles: number,
+  maxDepth: number,
+): Promise<{ candidates: ScannedCandidate[]; truncated: boolean }> {
+  const { readDir, readTextFile } = await import('@tauri-apps/plugin-fs')
+  const { isPathIgnored, parseGitignore } = await import('./gitignore')
+
+  const candidates: ScannedCandidate[] = []
+  let truncated = false
+
+  async function rulesFor(
+    directory: string,
+    relative: string,
+  ): Promise<IgnoreRule[]> {
+    try {
+      const contents = await readTextFile(
+        joinNativePath(directory, '.gitignore'),
+      )
+      return parseGitignore(contents, relative)
+    } catch {
+      return []
+    }
+  }
+
+  async function walk(
+    directory: string,
+    relative: string,
+    depth: number,
+    inherited: IgnoreRule[],
+  ): Promise<void> {
+    throwIfAborted(signal)
+    if (depth > maxDepth) return
+
+    const rules = inherited.concat(await rulesFor(directory, relative))
+
+    let entries: DirEntry[]
+    try {
+      entries = await readDir(directory)
+    } catch {
+      return
+    }
+
+    entries.sort((a, b) => a.name.localeCompare(b.name))
+
+    for (const entry of entries) {
+      throwIfAborted(signal)
+      if (entry.isSymlink) continue
+
+      const childRelative = relative
+        ? `${relative}/${entry.name}`
+        : entry.name
+
+      if (entry.isDirectory) {
+        if (EXCLUDED_DIRS.has(entry.name)) continue
+        if (isPathIgnored(childRelative, true, rules)) continue
+        await walk(
+          joinNativePath(directory, entry.name),
+          childRelative,
+          depth + 1,
+          rules,
+        )
+        if (truncated) return
+        continue
+      }
+
+      if (!entry.isFile) continue
+      if (isPathIgnored(childRelative, false, rules)) continue
+      if (isBinaryPath(entry.name)) continue
+
+      candidates.push({
+        absolute: joinNativePath(directory, entry.name),
+        relative: childRelative,
+      })
+
+      if (candidates.length >= maxFiles) {
+        truncated = true
+        return
+      }
+    }
+  }
+
+  await walk(root, '', 0, [])
+  return { candidates, truncated }
+}
+
+/**
+ * Recursively read a folder through the Tauri fs plugin and run every text file
+ * through the existing regex rules. Excludes `.git`, dependency/build folders,
+ * and anything matched by `.gitignore`.
+ *
+ * Only call this in the desktop app: the folder must already be in the fs scope
+ * (the native picker grants it via the `allow_directory` command).
+ */
+export async function scanDirectory(
+  root: string,
+  options: DirectoryScanOptions = {},
+): Promise<DirectoryScanOutcome> {
+  const { readTextFile, stat } = await import('@tauri-apps/plugin-fs')
+
+  const maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES
+  const maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES
+  const maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES
+  const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH
+
+  const { candidates, truncated } = await collectScanCandidates(
+    root,
+    options.signal,
+    maxFiles,
+    maxDepth,
+  )
+
+  const totalFiles = candidates.length
+  const files: ScannedFile[] = []
+  const results: ScanResult[] = []
+  let skippedFiles = 0
+  let totalBytes = 0
+  let cursor = 0
+  let processedFiles = 0
+
+  function emitProgress(currentPath: string): void {
+    if (processedFiles % 5 !== 0 && processedFiles !== totalFiles) return
+    options.onProgress?.({ processedFiles, totalFiles, currentPath })
+  }
+
+  async function worker(): Promise<void> {
+    while (true) {
+      throwIfAborted(options.signal)
+
+      const index = cursor
+      cursor += 1
+      if (index >= totalFiles) return
+
+      const candidate = candidates[index]
+
+      let info
+      try {
+        info = await stat(candidate.absolute)
+      } catch {
+        skippedFiles += 1
+        processedFiles += 1
+        emitProgress(candidate.relative)
+        continue
+      }
+
+      if (
+        info.size > maxFileBytes ||
+        totalBytes + info.size > maxTotalBytes
+      ) {
+        skippedFiles += 1
+        processedFiles += 1
+        emitProgress(candidate.relative)
+        continue
+      }
+
+      let content: string
+      try {
+        content = await readTextFile(candidate.absolute)
+      } catch {
+        skippedFiles += 1
+        processedFiles += 1
+        emitProgress(candidate.relative)
+        continue
+      }
+
+      throwIfAborted(options.signal)
+
+      if (content.includes('\u0000')) {
+        skippedFiles += 1
+        processedFiles += 1
+        emitProgress(candidate.relative)
+        continue
+      }
+
+      totalBytes += info.size
+      files.push({
+        path: candidate.relative,
+        language: languageForPath(candidate.relative),
+        touchedMinutesAgo: info.mtime
+          ? Math.max(
+              0,
+              Math.round((Date.now() - info.mtime.getTime()) / 60_000),
+            )
+          : undefined,
+      })
+      results.push(scanText(content, candidate.relative))
+
+      processedFiles += 1
+      emitProgress(candidate.relative)
+    }
+  }
+
+  const workerCount = Math.min(READ_CONCURRENCY, Math.max(totalFiles, 1))
+  await Promise.all(
+    Array.from({ length: workerCount }, () => worker()),
+  )
+
+  const pairs = files.map((file, index) => ({
+    file,
+    result: results[index],
+  }))
+
+  // Surface the riskiest files first, then keep the table alphabetical.
+  pairs.sort(
+    (a, b) =>
+      b.result.findings.length - a.result.findings.length ||
+      a.file.path.localeCompare(b.file.path),
+  )
+
+  return {
+    files: pairs.map((pair) => pair.file),
+    results: pairs.map((pair) => pair.result),
+    scannedFiles: files.length,
+    skippedFiles,
+    truncated,
+  }
+}
+

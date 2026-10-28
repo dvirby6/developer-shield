@@ -1,17 +1,23 @@
-import type { DemoFile } from '../data/demo'
-import type { ScanResult, SecretFinding, Severity } from '../utils/scanner'
+import type {
+  ScannedFile,
+  ScanResult,
+  SecretFinding,
+  Severity,
+} from '../utils/scanner'
 import { maskSecret } from '../utils/scanner'
 import { formatMinutesAgo } from '../utils/time'
 import { ScanIcon } from './icons'
 import { SeverityBadge } from './SeverityBadge'
 
 interface ScannedFilesTableProps {
-  files: DemoFile[]
+  files: ScannedFile[]
   results: ScanResult[]
   scanning: boolean
   onRescan: () => void
   className?: string
 }
+
+const MAX_RENDERED_ROWS = 300
 
 const severityRank: Record<Severity, number> = {
   critical: 3,
@@ -39,6 +45,8 @@ export function ScannedFilesTable({
   const flaggedCount = results.filter(
     (result) => result.findings.length > 0,
   ).length
+  const visibleFiles = files.slice(0, MAX_RENDERED_ROWS)
+  const hiddenCount = files.length - visibleFiles.length
 
   return (
     <section
@@ -94,7 +102,19 @@ export function ScannedFilesTable({
             </tr>
           </thead>
           <tbody>
-            {files.map((file) => {
+            {visibleFiles.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="px-4 py-12 text-center">
+                  <p className="text-[11px] text-zinc-500">
+                    No files scanned yet
+                  </p>
+                  <p className="mt-1 text-[10px] text-zinc-700">
+                    Run a scan and pick a project folder to see real results.
+                  </p>
+                </td>
+              </tr>
+            ) : null}
+            {visibleFiles.map((file) => {
               const result = resultByPath.get(file.path)
               const findings = result?.findings ?? []
               const first = findings[0]
@@ -141,7 +161,11 @@ export function ScannedFilesTable({
                     {findings.length}
                   </td>
                   <td className="border-b border-zinc-900/70 px-3 py-2.5 text-[10px] text-zinc-600">
-                    {formatMinutesAgo(file.touchedMinutesAgo)}
+                    {file.touchedMinutesAgo === undefined ? (
+                      <span className="text-zinc-700">—</span>
+                    ) : (
+                      formatMinutesAgo(file.touchedMinutesAgo)
+                    )}
                   </td>
                   <td className="border-b border-zinc-900/70 py-2.5 pl-3 pr-4 text-right">
                     <span className="inline-flex items-center gap-1.5 text-[10px] text-zinc-500">
@@ -158,6 +182,12 @@ export function ScannedFilesTable({
             })}
           </tbody>
         </table>
+        {hiddenCount > 0 ? (
+          <div className="sticky bottom-0 border-t border-zinc-900 bg-[#0a0a0d] px-4 py-2 text-[9.5px] text-zinc-600">
+            Showing the first {MAX_RENDERED_ROWS} of {files.length} files.
+            Riskiest files are listed first.
+          </div>
+        ) : null}
       </div>
     </section>
   )

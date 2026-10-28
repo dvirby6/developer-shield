@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { DetailsDrawer } from './components/DetailsDrawer'
 import { ProtectionPanel } from './components/ProtectionPanel'
 import { RulesPanel } from './components/RulesPanel'
@@ -8,13 +8,29 @@ import { Sidebar } from './components/Sidebar'
 import { Topbar } from './components/Topbar'
 import {
   ClockIcon,
+  CloseIcon,
   LoaderIcon,
   LockIcon,
   ScanIcon,
 } from './components/icons'
 import { demoFiles } from './data/demo'
 import { viewItems, type ViewId } from './data/navigation'
-import { scanFiles } from './utils/scanner'
+import {
+  isDesktopApp,
+  pickProjectFolder,
+  registerProjectScope,
+} from './services/desktop'
+import {
+  scanDirectory,
+  scanFiles,
+  type DirectoryScanOutcome,
+  type ScannedFile,
+} from './utils/scanner'
+import {
+  installPreCommitHook,
+  inspectPreCommitHook,
+  type HookStatus,
+} from './utils/preCommit'
 import { formatRelativeTime } from './utils/time'
 
 function viewFromHash(): ViewId {
@@ -24,34 +40,73 @@ function viewFromHash(): ViewId {
     : 'overview'
 }
 
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message
+  if (typeof error === 'string' && error) return error
+  return 'Something went wrong while reading the local filesystem.'
+}
+
+function workspaceLabel(path: string | null): string | null {
+  if (!path) return null
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path
+}
+
 interface RunScanButtonProps {
+  picking: boolean
   scanning: boolean
   onScan: () => void
 }
 
-function RunScanButton({ scanning, onScan }: RunScanButtonProps) {
+function RunScanButton({ picking, scanning, onScan }: RunScanButtonProps) {
+  const busy = picking || scanning
+  const label = picking
+    ? 'Choosing folder…'
+    : scanning
+      ? 'Scanning…'
+      : 'Run scan'
+
   return (
     <button
       type="button"
       onClick={onScan}
-      disabled={scanning}
+      disabled={busy}
       className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-zinc-100 px-3 py-1.5 text-[11px] font-medium text-zinc-950 transition hover:bg-white disabled:cursor-wait disabled:opacity-60"
     >
-      {scanning ? (
+      {busy ? (
         <LoaderIcon className="h-3 w-3 animate-spin" />
       ) : (
         <ScanIcon className="h-3 w-3" />
       )}
-      {scanning ? 'Scanning…' : 'Run scan'}
+      {label}
     </button>
   )
 }
 
+interface Notice {
+  kind: 'info' | 'error'
+  message: string
+}
+
 function App() {
+  const [files, setFiles] = useState<ScannedFile[]>(demoFiles)
   const [results, setResults] = useState(() => scanFiles(demoFiles))
   const [lastScan, setLastScan] = useState(() => new Date())
   const [now, setNow] = useState(() => Date.now())
+  const [picking, setPicking] = useState(false)
   const [scanning, setScanning] = useState(false)
+  const [scanProgress, setScanProgress] = useState<{
+    processedFiles: number
+    totalFiles: number
+  } | null>(null)
+  const [scanSummary, setScanSummary] = useState<DirectoryScanOutcome | null>(
+    null,
+  )
+  const [workspacePath, setWorkspacePath] = useState<string | null>(null)
+  const [notice, setNotice] = useState<Notice | null>(null)
+  const [hookStatus, setHookStatus] = useState<HookStatus>('unknown')
+  const [hookBusy, setHookBusy] = useState(false)
+  const [hookMessage, setHookMessage] = useState<string | null>(null)
+
   const [view, setView] = useState<ViewId>(viewFromHash)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [guardrailPane, setGuardrailPane] = useState<'settings' | 'rules'>(
@@ -63,23 +118,20 @@ function App() {
   const [liveWatch, setLiveWatch] = useState(true)
   const [autoSanitize, setAutoSanitize] = useState(true)
 
+  const scanRunRef = useRef(0)
+  const abortRef = useRef<AbortController | null>(null)
+  const isDesktop = isDesktopApp()
+
   // Keep relative timestamps honest without re-rendering constantly.
   useEffect(() => {
     const interval = window.setInterval(() => setNow(Date.now()), 30_000)
     return () => window.clearInterval(interval)
   }, [])
 
-  // Simulate a short local scan pass.
+  // Cancel any in-flight folder scan when the window closes.
   useEffect(() => {
-    if (!scanning) return
-    const timeout = window.setTimeout(() => {
-      setResults(scanFiles(demoFiles))
-      setLastScan(new Date())
-      setNow(Date.now())
-      setScanning(false)
-    }, 1100)
-    return () => window.clearTimeout(timeout)
-  }, [scanning])
+    return () => abortRef.current?.abort()
+  }, [])
 
   // Keep the active workspace in the URL hash so reloads and back/forward work.
   useEffect(() => {
@@ -121,6 +173,116 @@ function App() {
   const lastScanLabel = formatRelativeTime(lastScan, now)
   const hookEnabled = shieldActive && preCommit
   const latency = maxLatency < 1 ? '<1' : maxLatency.toFixed(1)
+  const workspaceName = workspaceLabel(workspacePath)
+
+  async function runDirectoryScan(root: string) {
+    const runId = scanRunRef.current + 1
+    scanRunRef.current = runId
+
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
+    setScanning(true)
+    setScanProgress({ processedFiles: 0, totalFiles: 0 })
+    setScanSummary(null)
+    setHookStatus('unknown')
+    setHookMessage(null)
+    setNotice(null)
+
+    try {
+      const outcome = await scanDirectory(root, {
+        signal: controller.signal,
+        onProgress: (progress) => {
+          if (scanRunRef.current !== runId) return
+          setScanProgress({
+            processedFiles: progress.processedFiles,
+            totalFiles: progress.totalFiles,
+          })
+        },
+      })
+
+      if (scanRunRef.current !== runId) return
+
+      setFiles(outcome.files)
+      setResults(outcome.results)
+      setScanSummary(outcome)
+      setWorkspacePath(root)
+      setLastScan(new Date())
+      setNow(Date.now())
+      setHookStatus(await inspectPreCommitHook(root))
+    } catch (error) {
+      if (scanRunRef.current !== runId) return
+      if (error instanceof Error && error.name === 'AbortError') return
+      setNotice({ kind: 'error', message: errorMessage(error) })
+    } finally {
+      if (scanRunRef.current === runId) {
+        setScanning(false)
+        setScanProgress(null)
+      }
+    }
+  }
+
+  async function startScan() {
+    if (picking || scanning) return
+    setNotice(null)
+
+    if (!isDesktop) {
+      setNotice({
+        kind: 'info',
+        message:
+          'Folder scanning uses the native desktop app. Start it with "npm run desktop".',
+      })
+      return
+    }
+
+    setPicking(true)
+
+    try {
+      const selected = await pickProjectFolder()
+      if (!selected) return
+
+      const root = await registerProjectScope(selected)
+      await runDirectoryScan(root)
+    } catch (error) {
+      setNotice({ kind: 'error', message: errorMessage(error) })
+    } finally {
+      setPicking(false)
+    }
+  }
+
+  function rescan() {
+    if (picking || scanning) return
+    if (workspacePath) {
+      void runDirectoryScan(workspacePath)
+    } else {
+      void startScan()
+    }
+  }
+
+  async function handleInstallHook() {
+    if (!workspacePath || hookBusy) return
+
+    setHookBusy(true)
+    setHookMessage(null)
+    setNotice(null)
+
+    try {
+      const installed = await installPreCommitHook(workspacePath)
+      setHookStatus('installed')
+      setPreCommit(true)
+      setHookMessage(
+        installed.replacedCustomHook
+          ? 'Installed. The previous hook was backed up next to it.'
+          : 'Pre-commit hook installed.',
+      )
+    } catch (error) {
+      setHookStatus('unknown')
+      setNotice({ kind: 'error', message: errorMessage(error) })
+    } finally {
+      setHookBusy(false)
+    }
+  }
 
   function navigate(next: ViewId) {
     setDetailsOpen(false)
@@ -141,6 +303,14 @@ function App() {
       onPreCommitChange={setPreCommit}
       onLiveWatchChange={setLiveWatch}
       onAutoSanitizeChange={setAutoSanitize}
+      workspaceName={workspaceName}
+      workspacePath={workspacePath}
+      isDesktop={isDesktop}
+      hookStatus={hookStatus}
+      hookBusy={hookBusy}
+      hookMessage={hookMessage}
+      onInstallHook={() => void handleInstallHook()}
+      onChooseFolder={() => void startScan()}
     />
   )
 
@@ -165,6 +335,7 @@ function App() {
             shieldActive={shieldActive}
             onShieldChange={setShieldActive}
             onOpenDetails={() => setDetailsOpen(true)}
+            workspacePath={workspacePath}
           />
 
           <main className="flex min-h-0 flex-1 flex-col overflow-hidden p-3 sm:p-4">
@@ -185,8 +356,9 @@ function App() {
                     {lastScanLabel}
                   </span>
                   <RunScanButton
+                    picking={picking}
                     scanning={scanning}
-                    onScan={() => setScanning(true)}
+                    onScan={() => void startScan()}
                   />
                 </div>
               </div>
@@ -204,17 +376,36 @@ function App() {
                   {hookEnabled ? 'Pre-commit active' : 'Pre-commit bypassed'}
                 </span>
                 <span>{totals.findings} findings</span>
-                <span>{demoFiles.length} files</span>
+                <span>{files.length} files</span>
+                {scanning ? (
+                  <span className="text-zinc-400">
+                    {scanProgress && scanProgress.totalFiles > 0
+                      ? `Scanned ${scanProgress.processedFiles}/${scanProgress.totalFiles}`
+                      : 'Preparing scan…'}
+                  </span>
+                ) : null}
+                {workspacePath ? (
+                  <span
+                    className="min-w-0 max-w-[240px] truncate font-mono text-[10px] text-zinc-600"
+                    title={workspacePath}
+                  >
+                    {workspacePath}
+                  </span>
+                ) : (
+                  <span className="rounded border border-zinc-800 px-1.5 py-0.5 text-[9px] uppercase tracking-[0.12em] text-zinc-600">
+                    Demo data
+                  </span>
+                )}
                 <span className="font-mono text-zinc-600">{latency} ms</span>
               </div>
 
               <div className="mt-3 flex min-h-0 flex-1 gap-3">
                 <ScannedFilesTable
                   className="min-h-0 flex-1"
-                  files={demoFiles}
+                  files={files}
                   results={results}
                   scanning={scanning}
-                  onRescan={() => setScanning(true)}
+                  onRescan={rescan}
                 />
 
                 <aside className="hidden w-[252px] shrink-0 xl:block">
@@ -232,22 +423,33 @@ function App() {
                     Scans
                   </h1>
                   <p className="mt-1 text-[11.5px] text-zinc-600">
-                    {demoFiles.length} files · {totals.findings} findings ·{' '}
+                    {files.length} files · {totals.findings} findings ·{' '}
                     {totals.flaggedFiles} flagged
+                    {scanSummary && scanSummary.skippedFiles > 0
+                      ? ` · ${scanSummary.skippedFiles} skipped`
+                      : ''}
+                    {scanSummary?.truncated ? ' · scan limit reached' : ''}
+                  </p>
+                  <p
+                    className="mt-0.5 truncate font-mono text-[9.5px] text-zinc-700"
+                    title={workspacePath ?? 'Demo fixtures'}
+                  >
+                    {workspacePath ?? 'Demo workspace'}
                   </p>
                 </div>
                 <RunScanButton
+                  picking={picking}
                   scanning={scanning}
-                  onScan={() => setScanning(true)}
+                  onScan={() => void startScan()}
                 />
               </div>
 
               <ScannedFilesTable
                 className="min-h-0 flex-1"
-                files={demoFiles}
+                files={files}
                 results={results}
                 scanning={scanning}
-                onRescan={() => setScanning(true)}
+                onRescan={rescan}
               />
             </div>
 
@@ -324,6 +526,27 @@ function App() {
           </footer>
         </div>
       </div>
+
+      {notice ? (
+        <div
+          role={notice.kind === 'error' ? 'alert' : 'status'}
+          className={`fixed bottom-11 right-3 z-[60] flex max-w-[min(420px,calc(100vw-1.5rem))] items-start gap-2 rounded-md border px-3 py-2 text-[10.5px] shadow-2xl sm:right-4 ${
+            notice.kind === 'error'
+              ? 'border-rose-900/70 bg-rose-950/90 text-rose-200'
+              : 'border-zinc-800 bg-zinc-900/95 text-zinc-300'
+          }`}
+        >
+          <span className="min-w-0 flex-1 break-words">{notice.message}</span>
+          <button
+            type="button"
+            onClick={() => setNotice(null)}
+            aria-label="Dismiss message"
+            className="shrink-0 text-current opacity-60 transition hover:opacity-100"
+          >
+            <CloseIcon className="h-3 w-3" />
+          </button>
+        </div>
+      ) : null}
 
       {detailsOpen ? (
         <DetailsDrawer onClose={() => setDetailsOpen(false)}>

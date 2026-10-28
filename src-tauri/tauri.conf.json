@@ -31,6 +31,11 @@
       "capabilities": ["default"]
     }
   },
+  "plugins": {
+    "fs": {
+      "requireLiteralLeadingDot": false
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

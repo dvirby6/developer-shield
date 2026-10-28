@@ -1,5 +1,5 @@
 import { viewItems, type ViewId } from '../data/navigation'
-import { SettingsIcon, ShieldIcon } from './icons'
+import { FolderIcon, SettingsIcon, ShieldIcon } from './icons'
 import { Toggle } from './Toggle'
 
 interface TopbarProps {
@@ -8,6 +8,7 @@ interface TopbarProps {
   shieldActive: boolean
   onShieldChange: (next: boolean) => void
   onOpenDetails: () => void
+  workspacePath: string | null
 }
 
 export function Topbar({
@@ -16,8 +17,12 @@ export function Topbar({
   shieldActive,
   onShieldChange,
   onOpenDetails,
+  workspacePath,
 }: TopbarProps) {
   const current = viewItems.find((item) => item.id === active)
+  const workspaceName = workspacePath
+    ? (workspacePath.split(/[\\/]/).filter(Boolean).pop() ?? workspacePath)
+    : 'demo workspace'
 
   return (
     <header className="shrink-0 border-b border-zinc-900 bg-[#09090b]/95">
@@ -34,7 +39,15 @@ export function Topbar({
           </span>
 
           <span className="hidden min-w-0 items-center gap-1.5 text-[11px] text-zinc-600 lg:flex">
-            <span className="truncate">Workspace / developer-shield</span>
+            <span className="truncate text-zinc-600">Workspace</span>
+            <span className="text-zinc-800">/</span>
+            <span
+              className="flex min-w-0 items-center gap-1 text-zinc-500"
+              title={workspacePath ?? 'Demo fixtures'}
+            >
+              <FolderIcon className="h-3 w-3 shrink-0 text-zinc-700" />
+              <span className="truncate">{workspaceName}</span>
+            </span>
             <span className="text-zinc-800">/</span>
             <span className="truncate text-zinc-400">{current?.label}</span>
             <span className="ml-0.5 rounded border border-zinc-900 px-1.5 py-0.5 font-mono text-[9px] text-zinc-700">
