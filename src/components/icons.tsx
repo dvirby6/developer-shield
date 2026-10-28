@@ -30,23 +30,6 @@ export function ScanIcon(props: IconProps) {
   )
 }
 
-export function KeyIcon(props: IconProps) {
-  return (
-    <svg {...baseProps} {...props}>
-      <circle cx="8" cy="15" r="4" />
-      <path d="m10.8 12.2 7-7M15.5 7.5l2 2M18 5l2 2" />
-    </svg>
-  )
-}
-
-export function GithubIcon(props: IconProps) {
-  return (
-    <svg {...baseProps} {...props}>
-      <path d="M9 19c-4 1.4-4-2.2-6-2.7M15 21v-3.4c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.3 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.2 4.2 0 0 0-.1-3.2s-1.1-.3-3.6 1.3a12.4 12.4 0 0 0-6.4 0C6.1 2.9 5 3.2 5 3.2a4.2 4.2 0 0 0-.1 3.2A4.6 4.6 0 0 0 3.6 9.6c0 4.7 2.7 5.7 5.5 6-.5.5-.5 1-.5 1.9V21" />
-    </svg>
-  )
-}
-
 export function ActivityIcon(props: IconProps) {
   return (
     <svg {...baseProps} {...props}>
@@ -77,15 +60,6 @@ export function LockIcon(props: IconProps) {
     <svg {...baseProps} {...props}>
       <rect x="4" y="10" width="16" height="10" rx="2" />
       <path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2" />
-    </svg>
-  )
-}
-
-export function EyeIcon(props: IconProps) {
-  return (
-    <svg {...baseProps} {...props}>
-      <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />
-      <circle cx="12" cy="12" r="2.8" />
     </svg>
   )
 }
@@ -160,15 +134,6 @@ export function ArrowRightIcon(props: IconProps) {
   )
 }
 
-export function BookIcon(props: IconProps) {
-  return (
-    <svg {...baseProps} {...props}>
-      <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5V5.5Z" />
-      <path d="M4 20.5A2.5 2.5 0 0 1 6.5 18H20M8 7h8M8 11h6" />
-    </svg>
-  )
-}
-
 export function PanelLeftIcon(props: IconProps) {
   return (
     <svg {...baseProps} {...props}>
@@ -182,22 +147,6 @@ export function ChevronDownIcon(props: IconProps) {
   return (
     <svg {...baseProps} {...props}>
       <path d="m6 9 6 6 6-6" />
-    </svg>
-  )
-}
-
-export function CommandIcon(props: IconProps) {
-  return (
-    <svg {...baseProps} {...props}>
-      <path d="M9 6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6Z" />
-    </svg>
-  )
-}
-
-export function ZapIcon(props: IconProps) {
-  return (
-    <svg {...baseProps} {...props}>
-      <path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12l1-8.5Z" />
     </svg>
   )
 }
@@ -234,15 +183,6 @@ export function CloseIcon(props: IconProps) {
   return (
     <svg {...baseProps} {...props}>
       <path d="M6 6l12 12M18 6 6 18" />
-    </svg>
-  )
-}
-
-export function SearchIcon(props: IconProps) {
-  return (
-    <svg {...baseProps} {...props}>
-      <circle cx="11" cy="11" r="7" />
-      <path d="m20 20-4-4" />
     </svg>
   )
 }

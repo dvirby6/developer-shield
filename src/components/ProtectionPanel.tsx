@@ -1,7 +1,8 @@
-import type { HookStatus } from '../utils/preCommit'
+import type { HookStatus, RepoHook } from '../utils/preCommit'
 import { SECRET_PATTERN_COUNT } from '../utils/scanner'
 import {
   FolderIcon,
+  GitBranchIcon,
   ScanIcon,
   ShieldIcon,
   SparklesIcon,
@@ -21,19 +22,20 @@ interface ProtectionPanelProps {
   workspaceName: string | null
   workspacePath: string | null
   isDesktop: boolean
-  hookStatus: HookStatus
+  hookRepos: RepoHook[]
   hookBusy: boolean
   hookMessage: string | null
+  customRuleCount: number
   onInstallHook: () => void
   onChooseFolder: () => void
 }
 
 const hookStatusView: Record<
-  HookStatus,
+  HookStatus | 'not-a-repo',
   { label: string; dot: string; tone: string }
 > = {
   installed: {
-    label: 'Installed',
+    label: 'Protected',
     dot: 'bg-emerald-500',
     tone: 'text-emerald-400/80',
   },
@@ -44,11 +46,30 @@ const hookStatusView: Record<
     tone: 'text-amber-400/80',
   },
   'not-a-repo': {
-    label: 'Not a Git repository',
+    label: 'No Git repository',
     dot: 'bg-zinc-600',
     tone: 'text-zinc-500',
   },
   unknown: { label: 'Not checked', dot: 'bg-zinc-600', tone: 'text-zinc-500' },
+}
+
+const repoDot: Record<HookStatus, string> = {
+  installed: 'bg-emerald-500',
+  missing: 'bg-zinc-600',
+  custom: 'bg-amber-500',
+  unknown: 'bg-zinc-600',
+}
+
+function aggregateStatus(repos: RepoHook[]): HookStatus | 'not-a-repo' {
+  if (repos.length === 0) return 'not-a-repo'
+  if (repos.every((repo) => repo.status === 'installed')) return 'installed'
+  if (repos.some((repo) => repo.status === 'custom')) return 'custom'
+  if (repos.some((repo) => repo.status === 'unknown')) return 'unknown'
+  return 'missing'
+}
+
+function repoName(root: string): string {
+  return root.split(/[\\/]/).filter(Boolean).pop() ?? root
 }
 
 export function ProtectionPanel({
@@ -63,9 +84,10 @@ export function ProtectionPanel({
   workspaceName,
   workspacePath,
   isDesktop,
-  hookStatus,
+  hookRepos,
   hookBusy,
   hookMessage,
+  customRuleCount,
   onInstallHook,
   onChooseFolder,
 }: ProtectionPanelProps) {
@@ -104,9 +126,14 @@ export function ProtectionPanel({
     },
   ]
 
-  const status = hookStatusView[hookStatus]
-  const canInstall = Boolean(workspaceName) && isDesktop && !hookBusy
+  const status = hookStatusView[aggregateStatus(hookRepos)]
+  const protectedCount = hookRepos.filter(
+    (repo) => repo.status === 'installed',
+  ).length
+  const canInstall =
+    Boolean(workspaceName) && isDesktop && !hookBusy && hookRepos.length > 0
   const canPick = !workspaceName && isDesktop && !hookBusy
+  const usesConfiguredPath = hookRepos.some((repo) => repo.usesCustomHooksPath)
 
   const actionLabel = !isDesktop
     ? 'Desktop app required'
@@ -114,9 +141,13 @@ export function ProtectionPanel({
       ? 'Choose folder'
       : hookBusy
         ? 'Installing…'
-        : hookStatus === 'installed'
-          ? 'Reinstall hook'
-          : 'Install hook'
+        : hookRepos.length === 0
+          ? 'No Git repository found'
+          : hookRepos.length > 1
+            ? `Install hooks (${hookRepos.length})`
+            : protectedCount === 1
+              ? 'Reinstall hook'
+              : 'Install hook'
 
   return (
     <section className="flex h-full min-h-0 flex-col">
@@ -166,7 +197,7 @@ export function ProtectionPanel({
       <div className="mt-1 shrink-0 border-t border-zinc-900 pt-3">
         <div className="flex items-center justify-between gap-2">
           <p className="text-[9px] font-medium uppercase tracking-[0.14em] text-zinc-600">
-            Repository hook
+            Repository hooks
           </p>
           <span className="flex items-center gap-1.5 text-[10px] text-zinc-500">
             <span className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
@@ -184,15 +215,56 @@ export function ProtectionPanel({
           </span>
         </p>
 
-        <p className="mt-1 text-[9.5px] leading-relaxed text-zinc-600">
-          Writes <span className="font-mono">.git/hooks/pre-commit</span> to
-          block staged secrets. Existing hooks are backed up.
+        {hookRepos.length > 0 ? (
+          <div className="mt-1.5">
+            <p className="text-[9.5px] text-zinc-600">
+              {protectedCount} of {hookRepos.length}{' '}
+              {hookRepos.length === 1 ? 'repository' : 'repositories'} protected
+            </p>
+            <ul className="mt-1 space-y-0.5">
+              {hookRepos.slice(0, 3).map((repo) => (
+                <li
+                  key={repo.root}
+                  className="flex min-w-0 items-center gap-1.5 text-[9.5px] text-zinc-500"
+                  title={repo.root}
+                >
+                  <span
+                    className={`h-1 w-1 shrink-0 rounded-full ${repoDot[repo.status]}`}
+                  />
+                  <span className="truncate">{repoName(repo.root)}</span>
+                  <span className="ml-auto flex shrink-0 items-center gap-0.5 text-zinc-700">
+                    <GitBranchIcon className="h-2.5 w-2.5" />
+                    {repo.detached ? 'detached' : (repo.branch ?? 'unknown')}
+                  </span>
+                </li>
+              ))}
+              {hookRepos.length > 3 ? (
+                <li className="text-[9px] text-zinc-700">
+                  +{hookRepos.length - 3} more repositories
+                </li>
+              ) : null}
+            </ul>
+          </div>
+        ) : (
+          <p className="mt-1 text-[9.5px] leading-relaxed text-zinc-600">
+            {workspaceName
+              ? 'No .git folder found in this workspace. Run "git init" and scan again.'
+              : 'Pick a folder to detect its Git repositories.'}
+          </p>
+        )}
+
+        <p className="mt-1 text-[9px] leading-relaxed text-zinc-600">
+          Writes <span className="font-mono">hooks/pre-commit</span> to block
+          staged secrets. Existing hooks are backed up.
+          {usesConfiguredPath
+            ? ' This repository uses a custom core.hooksPath.'
+            : ''}
         </p>
 
         <button
           type="button"
           onClick={workspaceName ? onInstallHook : onChooseFolder}
-          disabled={!canInstall && !canPick}
+          disabled={workspaceName ? !canInstall : !canPick}
           className="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-zinc-800 px-2 py-1.5 text-[10.5px] font-medium text-zinc-300 transition hover:border-zinc-700 hover:bg-zinc-900/60 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-45"
         >
           <TerminalIcon className="h-3 w-3" />
@@ -205,7 +277,9 @@ export function ProtectionPanel({
       </div>
 
       <p className="mt-auto shrink-0 pt-3 text-[10px] text-zinc-700">
-        {SECRET_PATTERN_COUNT} rules · v1.4 · offline
+        {SECRET_PATTERN_COUNT} built-in
+        {customRuleCount > 0 ? ` + ${customRuleCount} custom` : ''} rules · v1.5
+        · offline
       </p>
     </section>
   )

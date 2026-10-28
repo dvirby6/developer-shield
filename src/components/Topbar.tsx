@@ -1,5 +1,5 @@
 import { viewItems, type ViewId } from '../data/navigation'
-import { FolderIcon, SettingsIcon, ShieldIcon } from './icons'
+import { FolderIcon, GitBranchIcon, SettingsIcon, ShieldIcon } from './icons'
 import { Toggle } from './Toggle'
 
 interface TopbarProps {
@@ -9,6 +9,7 @@ interface TopbarProps {
   onShieldChange: (next: boolean) => void
   onOpenDetails: () => void
   workspacePath: string | null
+  branch: string | null
 }
 
 export function Topbar({
@@ -18,6 +19,7 @@ export function Topbar({
   onShieldChange,
   onOpenDetails,
   workspacePath,
+  branch,
 }: TopbarProps) {
   const current = viewItems.find((item) => item.id === active)
   const workspaceName = workspacePath
@@ -50,9 +52,12 @@ export function Topbar({
             </span>
             <span className="text-zinc-800">/</span>
             <span className="truncate text-zinc-400">{current?.label}</span>
-            <span className="ml-0.5 rounded border border-zinc-900 px-1.5 py-0.5 font-mono text-[9px] text-zinc-700">
-              main
-            </span>
+            {branch ? (
+              <span className="ml-0.5 flex max-w-[140px] items-center gap-1 rounded border border-zinc-900 px-1.5 py-0.5 font-mono text-[9px] text-zinc-700">
+                <GitBranchIcon className="h-2.5 w-2.5 shrink-0" />
+                <span className="truncate">{branch}</span>
+              </span>
+            ) : null}
           </span>
         </div>
 

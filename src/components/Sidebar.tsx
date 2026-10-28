@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { APP_VERSION } from '../data/app'
 import { viewItems, type ViewId } from '../data/navigation'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { LockIcon, PanelLeftIcon, ShieldIcon } from './icons'
@@ -118,7 +119,7 @@ export function Sidebar({ active, onNavigate }: SidebarProps) {
               Local only
             </p>
             <p className="mt-1 text-[9.5px] text-zinc-700">
-              v0.1.0 · 0 network calls
+              v{APP_VERSION} · 0 network calls
             </p>
           </div>
         )}

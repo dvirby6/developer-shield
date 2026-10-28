@@ -1,150 +1,184 @@
 /**
- * Pre-commit hook installation.
+ * Pre-commit hook installation for every Git repository in a workspace.
  *
- * The hook is a small POSIX shell script that greps staged files for the
- * highest-signal secret patterns used by the scanner. It runs entirely on the
- * developer's machine and can be bypassed with `git commit --no-verify`.
+ * Git itself resolves the authoritative hook location, so linked worktrees,
+ * submodules, `core.hooksPath`, and detached HEAD all behave the way Git
+ * expects. The Rust side returns the resolved directory and grants the fs
+ * plugin access to it at runtime.
  */
 
+import type { CustomRule } from './customRules'
 import { PRE_COMMIT_MARKER, buildPreCommitScript } from './preCommitScript'
 
-export type HookStatus =
-  | 'installed'
-  | 'missing'
-  | 'custom'
-  | 'not-a-repo'
-  | 'unknown'
+export type HookStatus = 'installed' | 'missing' | 'custom' | 'unknown'
 
-export interface InstalledHook {
-  hookPath: string
-  /** Set when a pre-existing custom hook was preserved. */
-  backupPath: string | null
-  replacedCustomHook: boolean
+export interface RepoHook {
+  /** Absolute repository root. */
+  root: string
+  /** Directory Git reads hooks from (may be outside the work tree). */
+  hooksDir: string
+  status: HookStatus
+  branch: string | null
+  detached: boolean
+  usesCustomHooksPath: boolean
 }
 
-async function grantScope(root: string): Promise<void> {
-  const { invoke } = await import('@tauri-apps/api/core')
-  await invoke<string>('allow_directory', { path: root })
+export interface InstallFailure {
+  root: string
+  message: string
 }
 
-/**
- * Locate the hook directory for a repository, including linked worktrees where
- * `.git` is a file containing a `gitdir: <path>` pointer.
- */
-async function resolveHooksDir(root: string): Promise<string | null> {
-  const fs = await import('@tauri-apps/plugin-fs')
-  const path = await import('@tauri-apps/api/path')
-
-  const gitPath = await path.join(root, '.git')
-
-  let info
-  try {
-    info = await fs.stat(gitPath)
-  } catch {
-    return null
-  }
-
-  if (info.isDirectory) {
-    return path.join(gitPath, 'hooks')
-  }
-
-  if (!info.isFile) return null
-
-  let pointer: string
-  try {
-    pointer = await fs.readTextFile(gitPath)
-  } catch {
-    return null
-  }
-
-  const line = pointer
-    .split(/\r?\n/)
-    .find((entry) => entry.trimStart().startsWith('gitdir:'))
-
-  if (!line) return null
-
-  const target = line.slice(line.indexOf(':') + 1).trim()
-  if (!target) return null
-
-  const gitDir = (await path.isAbsolute(target))
-    ? target
-    : await path.join(root, target)
-
-  // Linked worktrees can keep the hook directory outside the workspace root.
-  await grantScope(gitDir)
-
-  return path.join(gitDir, 'hooks')
+export interface InstallSummary {
+  repositories: number
+  installed: number
+  backedUp: number
+  failures: InstallFailure[]
 }
 
-/** Read the current hook state without changing anything. */
-export async function inspectPreCommitHook(root: string): Promise<HookStatus> {
-  try {
-    await grantScope(root)
-
-    const fs = await import('@tauri-apps/plugin-fs')
-    const path = await import('@tauri-apps/api/path')
-    const hooksDir = await resolveHooksDir(root)
-
-    if (!hooksDir) return 'not-a-repo'
-
-    const hookPath = await path.join(hooksDir, 'pre-commit')
-    if (!(await fs.exists(hookPath))) return 'missing'
-
-    const contents = await fs.readTextFile(hookPath)
-    return contents.includes(PRE_COMMIT_MARKER) ? 'installed' : 'custom'
-  } catch {
-    return 'unknown'
-  }
+interface RawGitHookInfo {
+  isRepo: boolean
+  workTree: string | null
+  hooksDir: string | null
+  branch: string | null
+  detached: boolean
+  usesCustomHooksPath: boolean
 }
 
-/**
- * Write the hook into `<repo>/.git/hooks/pre-commit`. A pre-existing custom hook
- * is copied to `pre-commit.developer-shield.bak` instead of being destroyed.
- */
-export async function installPreCommitHook(
+async function invoke<T>(command: string, args: Record<string, unknown>) {
+  const { invoke: ipc } = await import('@tauri-apps/api/core')
+  return ipc<T>(command, args)
+}
+
+async function inspectRepository(
+  fs: typeof import('@tauri-apps/plugin-fs'),
+  path: typeof import('@tauri-apps/api/path'),
   root: string,
-): Promise<InstalledHook> {
-  await grantScope(root)
+): Promise<RepoHook | null> {
+  const info = await invoke<RawGitHookInfo>('git_hook_info', { path: root })
+  if (!info.isRepo || !info.hooksDir) return null
 
-  const fs = await import('@tauri-apps/plugin-fs')
-  const path = await import('@tauri-apps/api/path')
-  const { invoke } = await import('@tauri-apps/api/core')
-
-  const hooksDir = await resolveHooksDir(root)
-  if (!hooksDir) {
-    throw new Error(
-      'This folder is not a Git repository. Run "git init" first, then try again.',
-    )
+  let status: HookStatus
+  try {
+    const hookPath = await path.join(info.hooksDir, 'pre-commit')
+    if (await fs.exists(hookPath)) {
+      const contents = await fs.readTextFile(hookPath)
+      status = contents.includes(PRE_COMMIT_MARKER) ? 'installed' : 'custom'
+    } else {
+      status = 'missing'
+    }
+  } catch {
+    status = 'unknown'
   }
 
-  await fs.mkdir(hooksDir, { recursive: true })
+  return {
+    root,
+    hooksDir: info.hooksDir,
+    status,
+    branch: info.branch,
+    detached: info.detached,
+    usesCustomHooksPath: info.usesCustomHooksPath,
+  }
+}
 
-  const hookPath = await path.join(hooksDir, 'pre-commit')
-  const backupPath = await path.join(
-    hooksDir,
-    'pre-commit.developer-shield.bak',
-  )
+/** Detect every repository in the workspace and report its hook state. */
+export async function inspectWorkspaceHooks(
+  workspaceRoot: string,
+): Promise<RepoHook[]> {
+  const fs = await import('@tauri-apps/plugin-fs')
+  const path = await import('@tauri-apps/api/path')
 
-  let backup: string | null = null
-  let replacedCustomHook = false
+  const repositories = await invoke<string[]>('discover_git_repositories', {
+    root: workspaceRoot,
+  })
 
-  if (await fs.exists(hookPath)) {
-    const existing = await fs.readTextFile(hookPath)
-
-    if (!existing.includes(PRE_COMMIT_MARKER)) {
-      replacedCustomHook = true
-      backup = backupPath
-
-      if (!(await fs.exists(backupPath))) {
-        await fs.writeTextFile(backupPath, existing)
-      }
+  const hooks: RepoHook[] = []
+  for (const repository of repositories) {
+    try {
+      const info = await inspectRepository(fs, path, repository)
+      if (info) hooks.push(info)
+    } catch (error) {
+      hooks.push({
+        root: repository,
+        hooksDir: '',
+        status: 'unknown',
+        branch: null,
+        detached: false,
+        usesCustomHooksPath: false,
+      })
+      console.warn('Could not inspect Git hooks', repository, error)
     }
   }
 
-  await fs.writeTextFile(hookPath, buildPreCommitScript())
-  await invoke('mark_executable', { path: hookPath })
+  return hooks
+}
 
-  return { hookPath, backupPath: backup, replacedCustomHook }
+/**
+ * Install or refresh the hook in every repository. Existing foreign hooks are
+ * preserved as `pre-commit.developer-shield.bak` next to the hook.
+ */
+export async function installPreCommitHook(
+  workspaceRoot: string,
+  customRules: readonly CustomRule[] = [],
+): Promise<InstallSummary> {
+  const fs = await import('@tauri-apps/plugin-fs')
+  const path = await import('@tauri-apps/api/path')
+
+  const repositories = await inspectWorkspaceHooks(workspaceRoot)
+  if (repositories.length === 0) {
+    throw new Error(
+      'No Git repositories found in this workspace. Run "git init" in a project folder and scan again.',
+    )
+  }
+
+  const script = buildPreCommitScript(customRules)
+  const summary: InstallSummary = {
+    repositories: repositories.length,
+    installed: 0,
+    backedUp: 0,
+    failures: [],
+  }
+
+  for (const repository of repositories) {
+    try {
+      if (!repository.hooksDir) {
+        throw new Error('Git did not report a hook directory')
+      }
+
+      await fs.mkdir(repository.hooksDir, { recursive: true })
+
+      const hookPath = await path.join(repository.hooksDir, 'pre-commit')
+      const backupPath = await path.join(
+        repository.hooksDir,
+        'pre-commit.developer-shield.bak',
+      )
+
+      if (await fs.exists(hookPath)) {
+        const existing = await fs.readTextFile(hookPath)
+        if (!existing.includes(PRE_COMMIT_MARKER) && !(await fs.exists(backupPath))) {
+          await fs.writeTextFile(backupPath, existing)
+          summary.backedUp += 1
+        }
+      }
+
+      await fs.writeTextFile(hookPath, script)
+      await invoke('mark_executable', { path: hookPath })
+      summary.installed += 1
+    } catch (error) {
+      summary.failures.push({
+        root: repository.root,
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  if (summary.installed === 0) {
+    throw new Error(
+      summary.failures[0]?.message ??
+        'The pre-commit hook could not be installed in any repository.',
+    )
+  }
+
+  return summary
 }
 
 export { buildPreCommitScript, PRE_COMMIT_MARKER }

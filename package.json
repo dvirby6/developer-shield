@@ -1,7 +1,9 @@
 {
   "name": "developer-shield",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
+  "description": "Local-first secret scanning, Git pre-commit protection, and AI prompt redaction.",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",

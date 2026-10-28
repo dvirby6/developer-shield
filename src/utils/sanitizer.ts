@@ -100,11 +100,6 @@ export class Sanitizer {
   }
 }
 
-/** One-shot helper for callers that do not need to restore later. */
-export function sanitizeText(text: string, file = 'inline'): SanitizeResult {
-  return new Sanitizer().sanitize(text, file)
-}
-
 /** Restore a sanitized string using a previously captured mapping. */
 export function restoreWithMapping(
   sanitized: string,

@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-  developer_shield_lib::run();
+    developer_shield_lib::run();
 }

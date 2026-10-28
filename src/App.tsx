@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { DetailsDrawer } from './components/DetailsDrawer'
+import { HistoryView } from './components/HistoryView'
 import { ProtectionPanel } from './components/ProtectionPanel'
 import { RulesPanel } from './components/RulesPanel'
 import { SanitizerWidget } from './components/SanitizerWidget'
@@ -15,23 +16,39 @@ import {
 } from './components/icons'
 import { demoFiles } from './data/demo'
 import { viewItems, type ViewId } from './data/navigation'
+import { exportJsonReport, openReportPreview } from './services/report'
+import { readState, writeState } from './services/storage'
 import {
   isDesktopApp,
   pickProjectFolder,
   registerProjectScope,
 } from './services/desktop'
 import {
+  setCustomRules as applyCustomRules,
   scanDirectory,
   scanFiles,
   type DirectoryScanOutcome,
   type ScannedFile,
 } from './utils/scanner'
 import {
+  addHistoryEntry,
+  createHistoryEntry,
+  normaliseHistory,
+  type ScanHistoryEntry,
+} from './utils/history'
+import {
+  normaliseCustomRules,
+  type CustomRule,
+} from './utils/customRules'
+import {
+  inspectWorkspaceHooks,
   installPreCommitHook,
-  inspectPreCommitHook,
-  type HookStatus,
+  type RepoHook,
 } from './utils/preCommit'
 import { formatRelativeTime } from './utils/time'
+
+const RULES_STORE = 'rules.json'
+const HISTORY_STORE = 'history.json'
 
 function viewFromHash(): ViewId {
   const candidate = window.location.hash.replace('#', '')
@@ -103,9 +120,12 @@ function App() {
   )
   const [workspacePath, setWorkspacePath] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
-  const [hookStatus, setHookStatus] = useState<HookStatus>('unknown')
+  const [hookRepos, setHookRepos] = useState<RepoHook[]>([])
   const [hookBusy, setHookBusy] = useState(false)
   const [hookMessage, setHookMessage] = useState<string | null>(null)
+  const [customRules, setCustomRules] = useState<CustomRule[]>([])
+  const [history, setHistory] = useState<ScanHistoryEntry[]>([])
+  const [historyLoading, setHistoryLoading] = useState(true)
 
   const [view, setView] = useState<ViewId>(viewFromHash)
   const [detailsOpen, setDetailsOpen] = useState(false)
@@ -150,6 +170,35 @@ function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [detailsOpen])
 
+  // Load locally persisted rules and history once, then apply the rules to the
+  // scanner so the initial demo snapshot already reflects them.
+  useEffect(() => {
+    let cancelled = false
+
+    void (async () => {
+      const [storedRules, storedHistory] = await Promise.all([
+        readState<unknown>(RULES_STORE),
+        readState<unknown>(HISTORY_STORE),
+      ])
+
+      if (cancelled) return
+
+      const rules = normaliseCustomRules(storedRules)
+      applyCustomRules(rules)
+      setCustomRules(rules)
+      setHistory(normaliseHistory(storedHistory))
+      setHistoryLoading(false)
+
+      if (scanRunRef.current === 0) {
+        setResults(scanFiles(demoFiles))
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const totals = useMemo(() => {
     const findings = results.reduce(
       (sum, result) => sum + result.findings.length,
@@ -186,7 +235,7 @@ function App() {
     setScanning(true)
     setScanProgress({ processedFiles: 0, totalFiles: 0 })
     setScanSummary(null)
-    setHookStatus('unknown')
+    setHookRepos([])
     setHookMessage(null)
     setNotice(null)
 
@@ -210,7 +259,22 @@ function App() {
       setWorkspacePath(root)
       setLastScan(new Date())
       setNow(Date.now())
-      setHookStatus(await inspectPreCommitHook(root))
+
+      const entry = createHistoryEntry(outcome, root)
+      setHistory((previous) => {
+        const next = addHistoryEntry(previous, entry)
+        void writeState(HISTORY_STORE, next)
+        return next
+      })
+
+      try {
+        const repositories = await inspectWorkspaceHooks(root)
+        if (scanRunRef.current !== runId) return
+        setHookRepos(repositories)
+      } catch {
+        if (scanRunRef.current !== runId) return
+        setHookRepos([])
+      }
     } catch (error) {
       if (scanRunRef.current !== runId) return
       if (error instanceof Error && error.name === 'AbortError') return
@@ -268,20 +332,108 @@ function App() {
     setNotice(null)
 
     try {
-      const installed = await installPreCommitHook(workspacePath)
-      setHookStatus('installed')
+      const summary = await installPreCommitHook(workspacePath, customRules)
       setPreCommit(true)
-      setHookMessage(
-        installed.replacedCustomHook
-          ? 'Installed. The previous hook was backed up next to it.'
-          : 'Pre-commit hook installed.',
-      )
+
+      const messages = [
+        `Installed in ${summary.installed} ${
+          summary.installed === 1 ? 'repository' : 'repositories'
+        }.`,
+      ]
+      if (summary.backedUp > 0) {
+        messages.push(
+          `${summary.backedUp} existing ${
+            summary.backedUp === 1 ? 'hook was' : 'hooks were'
+          } backed up.`,
+        )
+      }
+      if (summary.failures.length > 0) {
+        messages.push(`${summary.failures.length} failed.`)
+        setNotice({
+          kind: 'error',
+          message: `${summary.failures[0].root}: ${summary.failures[0].message}`,
+        })
+      }
+      setHookMessage(messages.join(' '))
+
+      try {
+        setHookRepos(await inspectWorkspaceHooks(workspacePath))
+      } catch {
+        // The install result is still valid; the next scan refreshes statuses.
+      }
     } catch (error) {
-      setHookStatus('unknown')
       setNotice({ kind: 'error', message: errorMessage(error) })
     } finally {
       setHookBusy(false)
     }
+  }
+
+  function persistRules(next: CustomRule[]) {
+    setCustomRules(next)
+    applyCustomRules(next)
+    void writeState(RULES_STORE, next)
+
+    if (!workspacePath) {
+      setResults(scanFiles(demoFiles))
+    }
+
+    if (hookRepos.some((repo) => repo.status === 'installed')) {
+      setHookMessage(
+        'Detection rules changed. Reinstall the hook to embed the new patterns.',
+      )
+    }
+  }
+
+  function addCustomRule(rule: CustomRule) {
+    persistRules([...customRules, rule])
+  }
+
+  function toggleCustomRule(id: string) {
+    persistRules(
+      customRules.map((rule) =>
+        rule.id === id ? { ...rule, enabled: !rule.enabled } : rule,
+      ),
+    )
+  }
+
+  function deleteCustomRule(id: string) {
+    persistRules(customRules.filter((rule) => rule.id !== id))
+  }
+
+  async function handleExportJson(entry: ScanHistoryEntry) {
+    try {
+      const target = await exportJsonReport(entry)
+      if (target) {
+        setNotice({ kind: 'info', message: `Report saved to ${target}` })
+      }
+    } catch (error) {
+      setNotice({ kind: 'error', message: errorMessage(error) })
+    }
+  }
+
+  function handleExportPdf(entry: ScanHistoryEntry) {
+    try {
+      openReportPreview(entry)
+    } catch (error) {
+      setNotice({ kind: 'error', message: errorMessage(error) })
+    }
+  }
+
+  function deleteHistoryEntry(id: string) {
+    setHistory((previous) => {
+      const next = previous.filter((entry) => entry.id !== id)
+      void writeState(HISTORY_STORE, next)
+      return next
+    })
+  }
+
+  function clearHistory() {
+    if (history.length === 0) return
+    if (!window.confirm('Delete the local scan history? This cannot be undone.')) {
+      return
+    }
+    setHistory([])
+    void writeState(HISTORY_STORE, [])
   }
 
   function navigate(next: ViewId) {
@@ -306,18 +458,29 @@ function App() {
       workspaceName={workspaceName}
       workspacePath={workspacePath}
       isDesktop={isDesktop}
-      hookStatus={hookStatus}
+      hookRepos={hookRepos}
       hookBusy={hookBusy}
       hookMessage={hookMessage}
+      customRuleCount={customRules.filter((rule) => rule.enabled).length}
       onInstallHook={() => void handleInstallHook()}
       onChooseFolder={() => void startScan()}
     />
   )
 
+  const primaryRepo =
+    hookRepos.find((repo) => repo.root === workspacePath) ?? hookRepos[0]
+  const branchLabel = primaryRepo
+    ? primaryRepo.detached
+      ? 'detached'
+      : primaryRepo.branch
+    : null
+
   const overviewClassName =
     view === 'overview' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'
   const scansClassName =
     view === 'scans' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'
+  const historyClassName =
+    view === 'history' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'
   const sanitizerClassName =
     view === 'sanitizer' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'
   const guardrailsClassName =
@@ -336,6 +499,7 @@ function App() {
             onShieldChange={setShieldActive}
             onOpenDetails={() => setDetailsOpen(true)}
             workspacePath={workspacePath}
+            branch={branchLabel}
           />
 
           <main className="flex min-h-0 flex-1 flex-col overflow-hidden p-3 sm:p-4">
@@ -453,6 +617,17 @@ function App() {
               />
             </div>
 
+            <div className={historyClassName}>
+              <HistoryView
+                entries={history}
+                loading={historyLoading}
+                onExportJson={(entry) => void handleExportJson(entry)}
+                onExportPdf={handleExportPdf}
+                onDelete={deleteHistoryEntry}
+                onClear={clearHistory}
+              />
+            </div>
+
             <div className={sanitizerClassName}>
               <SanitizerWidget />
             </div>
@@ -508,7 +683,13 @@ function App() {
                     guardrailPane === 'rules' ? 'block' : 'hidden'
                   } md:block`}
                 >
-                  <RulesPanel onTestRules={() => navigate('sanitizer')} />
+                  <RulesPanel
+                    customRules={customRules}
+                    onAddRule={addCustomRule}
+                    onToggleRule={toggleCustomRule}
+                    onDeleteRule={deleteCustomRule}
+                    onTestRules={() => navigate('sanitizer')}
+                  />
                 </div>
               </div>
             </div>

@@ -6,6 +6,7 @@
  */
 
 import type { DirEntry } from '@tauri-apps/plugin-fs'
+import { compilePattern, type CustomRule } from './customRules'
 import type { IgnoreRule } from './gitignore'
 
 export type SecretKind =
@@ -19,6 +20,7 @@ export type SecretKind =
   | 'jwt'
   | 'private-key'
   | 'generic'
+  | 'custom'
 
 export type Severity = 'critical' | 'high' | 'medium'
 
@@ -138,6 +140,45 @@ const SECRET_PATTERNS: SecretPattern[] = [
 
 export const SECRET_PATTERN_COUNT = SECRET_PATTERNS.length
 
+export interface SecretPatternInfo {
+  kind: SecretKind
+  label: string
+  severity: Severity
+}
+
+/** Built-in rule metadata for the rules panel (regexes stay private). */
+export const SECRET_PATTERN_CATALOG: SecretPatternInfo[] = SECRET_PATTERNS.map(
+  ({ kind, label, severity }) => ({ kind, label, severity }),
+)
+
+const customPatterns: SecretPattern[] = []
+
+/**
+ * Replace the active user-defined rules. Compiled patterns are shared by every
+ * scanner entry point (directory scans, the sanitizer, and rule previews).
+ */
+export function setCustomRules(rules: readonly CustomRule[]): void {
+  customPatterns.length = 0
+
+  for (const rule of rules) {
+    if (!rule.enabled) continue
+
+    const { regex } = compilePattern(rule.pattern, rule.ignoreCase)
+    if (!regex) continue
+
+    customPatterns.push({
+      kind: 'custom',
+      label: rule.label,
+      severity: rule.severity,
+      pattern: regex,
+    })
+  }
+}
+
+export function customRuleCount(): number {
+  return customPatterns.length
+}
+
 /** Values that look like credentials but are clearly placeholders. */
 const PLACEHOLDER_MARKERS = [
   'process.env',
@@ -205,8 +246,9 @@ interface Candidate {
 
 function collectCandidates(text: string): Candidate[] {
   const candidates: Candidate[] = []
+  const definitions = [...SECRET_PATTERNS, ...customPatterns]
 
-  for (const definition of SECRET_PATTERNS) {
+  for (const definition of definitions) {
     const regex = new RegExp(definition.pattern.source, definition.pattern.flags)
     let result: RegExpExecArray | null
 
@@ -321,6 +363,8 @@ export interface DirectoryScanOutcome {
   skippedFiles: number
   /** True when the file-count or byte budget stopped the walk early. */
   truncated: boolean
+  /** Wall-clock duration of the whole scan, in milliseconds. */
+  durationMs: number
 }
 
 const DEFAULT_MAX_FILES = 2_000
@@ -548,6 +592,7 @@ export async function scanDirectory(
   root: string,
   options: DirectoryScanOptions = {},
 ): Promise<DirectoryScanOutcome> {
+  const startedAt = performance.now()
   const { readTextFile, stat } = await import('@tauri-apps/plugin-fs')
 
   const maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES
@@ -665,6 +710,7 @@ export async function scanDirectory(
     scannedFiles: files.length,
     skippedFiles,
     truncated,
+    durationMs: performance.now() - startedAt,
   }
 }
 

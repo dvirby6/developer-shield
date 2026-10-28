@@ -1,10 +1,9 @@
 [package]
 name = "developer-shield"
-version = "0.1.0"
+version = "1.0.0"
 description = "Local-first secret scanning, pre-commit protection, and AI redaction."
-authors = ["Developer Shield"]
-license = ""
-repository = ""
+authors = ["Developer Shield contributors"]
+license = "MIT"
 edition = "2024"
 rust-version = "1.90"
 

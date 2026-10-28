@@ -10,8 +10,11 @@ export function formatRelativeTime(date: Date, now = Date.now()): string {
   return `${days}d ago`
 }
 
-export function formatClock(date: Date): string {
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+export function formatDateTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleString(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  })
 }
 
 export function formatMinutesAgo(minutes: number): string {
