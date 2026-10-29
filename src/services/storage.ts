@@ -6,7 +6,7 @@
  * behaves the same way. Nothing is ever uploaded.
  */
 
-import { isDesktopApp } from './desktop'
+import { isDesktopApp } from './desktop.ts'
 
 const STATE_DIR = 'state'
 const LOCAL_PREFIX = 'developer-shield:'

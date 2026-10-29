@@ -5,13 +5,13 @@
  * to disk. History is capped so the local cache cannot grow without bound.
  */
 
-import { APP_VERSION } from '../data/app'
+import { APP_VERSION } from '../data/app.ts'
 import type {
   DirectoryScanOutcome,
   SecretKind,
   Severity,
-} from './scanner'
-import { maskSecret } from './scanner'
+} from './scanner.ts'
+import { maskSecret } from './scanner.ts'
 
 export const HISTORY_LIMIT = 25
 const MAX_FINDINGS_PER_ENTRY = 1_000

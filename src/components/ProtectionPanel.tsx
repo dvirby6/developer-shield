@@ -279,7 +279,7 @@ export function ProtectionPanel({
       <p className="mt-auto shrink-0 pt-3 text-[10px] text-zinc-700">
         {SECRET_PATTERN_COUNT} built-in
         {customRuleCount > 0 ? ` + ${customRuleCount} custom` : ''} rules · v1.5
-        · offline
+        · local-first
       </p>
     </section>
   )

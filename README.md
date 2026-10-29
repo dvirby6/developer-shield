@@ -1,14 +1,15 @@
 # Developer Shield
 
-**Catch leaked secrets before they ship — entirely on your machine.**
+**Catch leaked secrets before they ship — local-first by default.**
 
 Developer Shield is a local-first security desktop app for developers. It scans
 repositories for credentials, installs a Git pre-commit guardrail, keeps a local
 audit trail with exportable compliance reports, and redacts secrets before code
 is pasted into an AI assistant.
 
-**0% cloud. 0 accounts. 0 telemetry. No source code, secret, or scan result ever
-leaves the machine.**
+**Local-first by default. 0 accounts. 0 telemetry. No source code or raw secret
+ever leaves the machine.** Local LAN / P2P Sync is strictly opt-in: it uploads
+only a passphrase-encrypted snapshot of custom rules and masked scan history.
 
 Built with React, Vite, Tauri, and Rust. Ships as a native window on Windows,
 macOS, and Linux; the same UI also runs in a browser during development.
@@ -25,6 +26,7 @@ macOS, and Linux; the same UI also runs in a browser during development.
 - [Usage](#usage)
 - [Custom detection rules](#custom-detection-rules)
 - [Scan history and reports](#scan-history-and-reports)
+- [Local LAN and P2P sync (opt-in)](#local-lan-and-p2p-sync-opt-in)
 - [Pre-commit hook](#pre-commit-hook)
 - [Security model](#security-model)
 - [Local data](#local-data)
@@ -46,8 +48,8 @@ Developer Shield moves that check earlier and keeps it private:
 - **Local-first by architecture.** Scanning, redaction, history, and report
   generation all run on your machine. There is no backend to trust.
 - **Zero cloud cost.** No seats, no API keys, no per-scan billing.
-- **Zero data leakage.** The production CSP only permits local assets and Tauri
-  IPC. Reports persist masked values, never raw secrets.
+- **Zero data leakage by default.** Scan data stays on the machine until you
+  explicitly enable sync. Reports persist masked values, never raw secrets.
 - **Guardrails, not just dashboards.** One click writes a pre-commit hook into
   every Git repository in the workspace.
 
@@ -66,6 +68,10 @@ Developer Shield moves that check earlier and keeps it private:
   up, never silently destroyed.
 - **Scan history and compliance reports.** Every scan is capped, stored locally,
   and exportable as masked JSON or a print-ready A4 PDF.
+- **Opt-in encrypted Local LAN / P2P sync.** Push or pull custom rules and
+  masked scan history over HTTPS or a private LAN address as an AES-256-GCM
+  snapshot. The passphrase never leaves memory, and the peer only ever receives
+  ciphertext.
 - **AI sanitizer.** Replaces secrets with stable `[REDACTED_ID]` tokens and keeps
   the de-anonymisation map in memory for the current session only.
 - **Screen-fit desktop UI** with a dark developer dashboard, responsive drawers,
@@ -96,6 +102,8 @@ credentials from `src/data/demo.ts`.
 │  utils/customRules.ts  user rules · validation · previews                │
 │  utils/history.ts      masked audit trail model                          │
 │  services/report.ts    JSON + print-ready PDF reports                    │
+│  services/encryption.ts AES-GCM + PBKDF2 snapshot envelopes             │
+│  services/cloudSync.ts opt-in encrypted push/pull transport              │
 │  services/storage.ts   app-data JSON files (localStorage fallback)       │
 └──────────────────────────────────┬───────────────────────────────────────┘
                                    │ Tauri IPC (local only)
@@ -113,7 +121,8 @@ credentials from `src/data/demo.ts`.
 ```
 
 Scanning never crosses the IPC boundary except for file reads inside the
-runtime-scoped folder. There is no network client in the app.
+runtime-scoped folder. There is no background network client. The only outbound
+traffic is a user-triggered push or pull to the sync endpoint they configured.
 
 ## Quick start
 
@@ -177,6 +186,10 @@ bundles on tag pushes.
    print-ready PDF. The PDF uses the system print dialog — choose *Save as PDF*.
 6. **Sanitize AI prompts.** Paste code into **Sanitizer**, run it, and copy the
    redacted output. Restore tokens locally after the AI responds.
+7. **Sync across devices (optional).** In **Guardrails → Local sync**, enter an
+   HTTPS or private-LAN HTTP endpoint and a passphrase, enable sync, then push
+   or pull. Snapshots are encrypted locally before upload; pull replaces local
+   rules and history only after confirmation.
 
 ## Custom detection rules
 
@@ -216,6 +229,39 @@ editing rules. Case-insensitive rules are scanned in a separate `grep -i` pass.
     the operating system's PDF printer.
 - Entries can be deleted individually, or all history cleared.
 
+## Local LAN and P2P sync (opt-in)
+
+Local LAN / P2P Sync moves **custom rules and masked scan history** between
+devices on your network. It is off until you configure it, and every transfer is
+manual.
+
+1. Open **Guardrails → Local sync**.
+2. Enter an endpoint that accepts a `PUT` and `GET` for the same URL. Use HTTPS
+   for public hosts. Plain HTTP is accepted for `localhost`, `.local` names,
+   single-label device hostnames (`http://nas:8080/sync`), and private addresses
+   (`10.x`, `172.16–31.x`, `192.168.x`, `169.254.x`).
+3. Enter a passphrase of at least 8 characters. The enable toggle unlocks as
+   soon as the endpoint is valid and the passphrase is entered, then press
+   **Push snapshot** or **Pull snapshot**.
+
+Protocol and storage:
+
+- `PUT <endpoint>` receives one JSON envelope; `GET <endpoint>` returns it.
+- The peer must allow cross-origin `GET`, `PUT`, and `OPTIONS` requests.
+- Rules and history are serialised locally, encrypted with AES-256-GCM using a
+  PBKDF2-derived key (600,000 iterations, fresh salt and IV per sync), and only
+  then uploaded. The peer sees an opaque `developer-shield.e2e` envelope.
+- The passphrase lives in component memory only. It is cleared after a
+  successful sync and is never written to `sync.json`, logs, or request headers.
+- `sync.json` stores only `enabled`, `endpoint`, `lastSyncedAt`, and
+  `lastDirection`.
+- **Pull is destructive after confirmation:** it replaces local custom rules and
+  scan history with the decrypted snapshot. The wrong passphrase or a tampered
+  envelope fails authentication and leaves local state untouched.
+- Endpoint validation is enforced in the UI and again in the transport layer.
+  Public plain-HTTP hosts are rejected; URLs with embedded credentials or
+  fragments are rejected.
+
 ## Pre-commit hook
 
 The hook scans **staged blobs** (`git show :file`), not the working tree, so a
@@ -247,8 +293,14 @@ DEVELOPER_SHIELD_SKIP=1 git commit   # skip the scan, keep other hooks' behaviou
   after `git rev-parse` resolves them.
 - **App data is separate.** Custom rules and history live under the app's data
   directory, reachable only through scoped fs permissions.
-- **CSP is local-only.** `default-src 'self'`, IPC, and local assets. No remote
-  origins are allowed in production.
+- **CSP is local by default.** `default-src 'self'`, IPC, and local assets.
+  `connect-src` permits HTTPS and HTTP so a configured LAN peer can be reached;
+  endpoint validation rejects public plain-HTTP hosts before any request.
+- **Sync is end-to-end encrypted.** Custom rules and masked scan history are
+  encrypted before upload. The passphrase stays in memory and is never stored.
+- **Pull validates before replacing state.** Decrypted snapshots must match the
+  supported schema; wrong passphrases and tampered ciphertext fail AES-GCM
+  authentication.
 - **Reports are masked.** The JSON and PDF exports contain masked matches, never
   raw secrets.
 - **Sanitizer mappings are ephemeral.** They live in memory and are discarded on
@@ -270,6 +322,7 @@ Files:
 
 - `rules.json` — custom detection rules
 - `history.json` — masked scan history
+- `sync.json` — sync endpoint, enable flag, and last-sync metadata only
 
 The browser build falls back to `localStorage` under the `developer-shield:`
 prefix.
@@ -282,6 +335,7 @@ npm run dev          # Vite dev server (http://localhost:1420)
 npm run desktop      # native Tauri app (starts Vite automatically)
 npm run build        # TypeScript project build + production bundle
 npm run lint         # ESLint
+npm test             # encryption + local sync unit tests (Node test runner)
 npm run preview      # preview the production web bundle
 npm run desktop:build # build native installers
 
@@ -296,11 +350,15 @@ cargo test --manifest-path src-tauri/Cargo.toml
 src/
   App.tsx                    app shell, scan orchestration, state wiring
   components/                topbar, sidebar, tables, rules, history, dialogs
+  components/CloudSyncPanel.tsx  opt-in sync configuration and actions
   data/app.ts                version and product constants
   data/demo.ts               fictional workspace fixtures
   data/navigation.ts         workspace views
+  hooks/useCloudSync.ts      sync state, status, and push/pull actions
   hooks/useMediaQuery.ts     native window-width subscriptions
   services/desktop.ts        Tauri dialog/scope bridges
+  services/cloudSync.ts      endpoint validation and encrypted transport
+  services/encryption.ts     local E2E encryption (AES-GCM + PBKDF2)
   services/report.ts         JSON + print-ready PDF reports
   services/storage.ts        local state persistence (app data / localStorage)
   utils/customRules.ts       custom rule validation and previews
@@ -347,7 +405,9 @@ Guidelines:
 - Keep pull requests small and focused; one concern per PR.
 - Match the existing TypeScript/Rust style and the dark UI design system.
 - Add or update documentation when behaviour changes.
-- Never add network calls, telemetry, or static filesystem scopes.
+- Never add background network calls, telemetry, or static filesystem scopes.
+  User-triggered encrypted sync to a configured endpoint is the only outbound
+  traffic allowed.
 - Security-sensitive changes (hook script, Rust commands, capabilities) need a
   clear threat-model note in the PR.
 

@@ -1,7 +1,7 @@
 {
   "name": "developer-shield",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Local-first secret scanning, Git pre-commit protection, and AI prompt redaction.",
   "license": "MIT",
   "type": "module",
@@ -9,6 +9,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test": "node --experimental-strip-types --test tests/encryption.test.ts tests/cloudSync.test.ts",
     "preview": "vite preview",
     "tauri": "tauri",
     "desktop": "tauri dev",

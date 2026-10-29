@@ -109,17 +109,17 @@ export function Sidebar({ active, onNavigate }: SidebarProps) {
         }`}
       >
         {collapsed ? (
-          <span title="Local only" className="text-zinc-600">
+          <span title="Local-first protection" className="text-zinc-600">
             <LockIcon className="h-3.5 w-3.5" />
           </span>
         ) : (
           <div>
             <p className="flex items-center gap-1.5 text-[10px] text-zinc-500">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-              Local only
+              Local-first
             </p>
             <p className="mt-1 text-[9.5px] text-zinc-700">
-              v{APP_VERSION} · 0 network calls
+              v{APP_VERSION} · encrypted sync opt-in
             </p>
           </div>
         )}

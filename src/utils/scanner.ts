@@ -6,7 +6,7 @@
  */
 
 import type { DirEntry } from '@tauri-apps/plugin-fs'
-import { compilePattern, type CustomRule } from './customRules'
+import { compilePattern, type CustomRule } from './customRules.ts'
 import type { IgnoreRule } from './gitignore'
 
 export type SecretKind =

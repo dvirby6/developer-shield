@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { DetailsDrawer } from './components/DetailsDrawer'
+import { CloudSyncPanel } from './components/CloudSyncPanel'
 import { HistoryView } from './components/HistoryView'
 import { ProtectionPanel } from './components/ProtectionPanel'
 import { RulesPanel } from './components/RulesPanel'
@@ -18,6 +19,7 @@ import { demoFiles } from './data/demo'
 import { viewItems, type ViewId } from './data/navigation'
 import { exportJsonReport, openReportPreview } from './services/report'
 import { readState, writeState } from './services/storage'
+import type { SyncSnapshot } from './services/cloudSync'
 import {
   isDesktopApp,
   pickProjectFolder,
@@ -129,9 +131,9 @@ function App() {
 
   const [view, setView] = useState<ViewId>(viewFromHash)
   const [detailsOpen, setDetailsOpen] = useState(false)
-  const [guardrailPane, setGuardrailPane] = useState<'settings' | 'rules'>(
-    'settings',
-  )
+  const [guardrailPane, setGuardrailPane] = useState<
+    'settings' | 'rules' | 'sync'
+  >('settings')
 
   const [shieldActive, setShieldActive] = useState(true)
   const [preCommit, setPreCommit] = useState(true)
@@ -382,6 +384,15 @@ function App() {
         'Detection rules changed. Reinstall the hook to embed the new patterns.',
       )
     }
+  }
+
+  /** Replace local rules and history with a decrypted local sync snapshot. */
+  function applySyncSnapshot(snapshot: SyncSnapshot) {
+    persistRules(normaliseCustomRules(snapshot.rules))
+
+    const nextHistory = normaliseHistory(snapshot.history)
+    setHistory(nextHistory)
+    void writeState(HISTORY_STORE, nextHistory)
   }
 
   function addCustomRule(rule: CustomRule) {
@@ -638,19 +649,20 @@ function App() {
                   Guardrails
                 </h1>
                 <p className="mt-1 text-[11.5px] text-zinc-600">
-                  Shield, pre-commit hook, live watch, and detection rules.
+                  Shield, pre-commit hook, detection rules, and encrypted sync.
                 </p>
               </div>
 
               <div
                 role="tablist"
                 aria-label="Guardrails panes"
-                className="mb-2 flex shrink-0 items-center gap-1 rounded-md border border-zinc-900 p-1 md:hidden"
+                className="mb-2 flex shrink-0 items-center gap-1 rounded-md border border-zinc-900 p-1 xl:hidden"
               >
                 {(
                   [
                     { id: 'settings', label: 'Settings' },
-                    { id: 'rules', label: 'Detection rules' },
+                    { id: 'rules', label: 'Rules' },
+                    { id: 'sync', label: 'Local sync' },
                   ] as const
                 ).map((pane) => (
                   <button
@@ -670,18 +682,18 @@ function App() {
                 ))}
               </div>
 
-              <div className="grid min-h-0 flex-1 gap-3 md:grid-cols-2">
+              <div className="grid min-h-0 flex-1 gap-3 xl:grid-cols-3">
                 <div
                   className={`min-h-0 flex-col overflow-hidden rounded-lg border border-zinc-900 bg-[#0a0a0d] p-4 ${
                     guardrailPane === 'settings' ? 'flex' : 'hidden'
-                  } md:flex`}
+                  } xl:flex`}
                 >
                   {protectionPanel}
                 </div>
                 <div
                   className={`min-h-0 ${
                     guardrailPane === 'rules' ? 'block' : 'hidden'
-                  } md:block`}
+                  } xl:block`}
                 >
                   <RulesPanel
                     customRules={customRules}
@@ -689,6 +701,18 @@ function App() {
                     onToggleRule={toggleCustomRule}
                     onDeleteRule={deleteCustomRule}
                     onTestRules={() => navigate('sanitizer')}
+                  />
+                </div>
+                <div
+                  className={`min-h-0 ${
+                    guardrailPane === 'sync' ? 'block' : 'hidden'
+                  } xl:block`}
+                >
+                  <CloudSyncPanel
+                    customRules={customRules}
+                    history={history}
+                    now={now}
+                    onApplySnapshot={applySyncSnapshot}
                   />
                 </div>
               </div>
@@ -700,9 +724,9 @@ function App() {
             <p className="flex items-center gap-1.5">
               <LockIcon className="h-3 w-3" />
               <span className="hidden sm:inline">
-                No code leaves this machine
+                Local-first · encrypted sync opt-in
               </span>
-              <span className="sm:hidden">Local only</span>
+              <span className="sm:hidden">Local-first</span>
             </p>
           </footer>
         </div>
