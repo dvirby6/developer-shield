@@ -35,6 +35,8 @@ export const SYNC_SNAPSHOT_VERSION = 1
 const MAX_SNAPSHOT_BYTES = 10 * 1024 * 1024
 const MAX_ENDPOINT_LENGTH = 2048
 const REQUEST_TIMEOUT_MS = 20_000
+const OVERSIZED_SNAPSHOT_MESSAGE =
+  'The encrypted snapshot is larger than the supported limit.'
 
 export type SyncDirection = 'push' | 'pull'
 
@@ -277,10 +279,11 @@ function isOffline(): boolean {
   return typeof navigator !== 'undefined' && navigator.onLine === false
 }
 
-async function request(
+async function request<T>(
   endpoint: string,
   init: RequestInit,
-): Promise<Response> {
+  consume: (response: Response) => Promise<T>,
+): Promise<T> {
   if (typeof fetch !== 'function') {
     throw new SyncRequestError(
       'network',
@@ -299,13 +302,20 @@ async function request(
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
 
   try {
-    return await fetch(endpoint, {
+    const response = await fetch(endpoint, {
       ...init,
       credentials: 'omit',
       cache: 'no-store',
+      redirect: 'error',
       signal: controller.signal,
     })
+
+    // Keep the deadline alive while the body is consumed so an endpoint that
+    // stalls mid-response cannot leave the UI stuck in "syncing".
+    return await consume(response)
   } catch (error) {
+    if (error instanceof SyncRequestError) throw error
+
     if (controller.signal.aborted) {
       throw new SyncRequestError(
         'timeout',
@@ -324,12 +334,51 @@ async function request(
 
     throw new SyncRequestError(
       'network',
-      'Could not reach the sync endpoint. Check the URL and its CORS policy.',
+      'Could not reach the sync endpoint. Check the URL, its CORS policy, and that it does not redirect.',
       { cause: error },
     )
   } finally {
     clearTimeout(timeout)
   }
+}
+
+/**
+ * Read a response body while enforcing the snapshot cap. Streaming means a
+ * hostile endpoint cannot make us buffer an unbounded payload before checking.
+ */
+async function readResponseText(response: Response): Promise<string> {
+  if (!response.body) {
+    const text = await response.text()
+    if (new TextEncoder().encode(text).byteLength > MAX_SNAPSHOT_BYTES) {
+      throw new SyncRequestError('invalid-response', OVERSIZED_SNAPSHOT_MESSAGE)
+    }
+    return text
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  const parts: string[] = []
+  let received = 0
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      received += value.byteLength
+      if (received > MAX_SNAPSHOT_BYTES) {
+        await reader.cancel().catch(() => {})
+        throw new SyncRequestError('invalid-response', OVERSIZED_SNAPSHOT_MESSAGE)
+      }
+
+      parts.push(decoder.decode(value, { stream: true }))
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  parts.push(decoder.decode())
+  return parts.join('')
 }
 
 function httpError(response: Response): SyncRequestError {
@@ -364,20 +413,24 @@ export async function pushSyncSnapshot(
   }
 
   const encrypted = await encryptPayload(snapshot, passphrase)
-  const response = await request(endpoint.trim(), {
-    method: 'PUT',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
+  return request(
+    endpoint.trim(),
+    {
+      method: 'PUT',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: encrypted,
     },
-    body: encrypted,
-  })
+    async (response) => {
+      if (!response.ok) throw httpError(response)
 
-  if (!response.ok) throw httpError(response)
-
-  return {
-    ciphertextBytes: new TextEncoder().encode(encrypted).byteLength,
-  }
+      return {
+        ciphertextBytes: new TextEncoder().encode(encrypted).byteLength,
+      } satisfies SyncPushResult
+    },
+  )
 }
 
 /** GET an envelope from the endpoint, decrypt it, and validate the snapshot. */
@@ -390,41 +443,42 @@ export async function pullSyncSnapshot(
     throw new SyncRequestError('invalid-endpoint', endpointError)
   }
 
-  const response = await request(endpoint.trim(), {
-    method: 'GET',
-    headers: { Accept: 'application/json' },
-  })
+  const encrypted = await request(
+    endpoint.trim(),
+    {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+    },
+    async (response) => {
+      if (response.status === 404) {
+        throw new SyncRequestError(
+          'invalid-response',
+          'No encrypted snapshot was found at this endpoint.',
+          { status: 404 },
+        )
+      }
 
-  if (response.status === 404) {
-    throw new SyncRequestError(
-      'invalid-response',
-      'No encrypted snapshot was found at this endpoint.',
-      { status: 404 },
-    )
-  }
+      if (!response.ok) throw httpError(response)
 
-  if (!response.ok) throw httpError(response)
+      const declaredLength = Number(response.headers.get('content-length') ?? 0)
+      if (
+        Number.isFinite(declaredLength) &&
+        declaredLength > MAX_SNAPSHOT_BYTES
+      ) {
+        throw new SyncRequestError(
+          'invalid-response',
+          OVERSIZED_SNAPSHOT_MESSAGE,
+        )
+      }
 
-  const declaredLength = Number(response.headers.get('content-length') ?? 0)
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_SNAPSHOT_BYTES) {
-    throw new SyncRequestError(
-      'invalid-response',
-      'The encrypted snapshot is larger than the supported limit.',
-    )
-  }
+      return readResponseText(response)
+    },
+  )
 
-  const encrypted = await response.text()
   if (!encrypted.trim()) {
     throw new SyncRequestError(
       'invalid-response',
       'The sync endpoint returned an empty snapshot.',
-    )
-  }
-
-  if (new TextEncoder().encode(encrypted).byteLength > MAX_SNAPSHOT_BYTES) {
-    throw new SyncRequestError(
-      'invalid-response',
-      'The encrypted snapshot is larger than the supported limit.',
     )
   }
 

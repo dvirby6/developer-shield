@@ -173,6 +173,7 @@ test('push encrypts the snapshot before uploading it', async () => {
     assert.equal(mock.calls[0].url, ENDPOINT)
     assert.equal(mock.calls[0].init.method, 'PUT')
     assert.equal(mock.calls[0].init.credentials, 'omit')
+    assert.equal(mock.calls[0].init.redirect, 'error')
 
     const body = String(mock.calls[0].init.body)
     assert.equal(body.includes('acme-key'), false)
@@ -203,6 +204,7 @@ test('pull fetches and decrypts a snapshot', async () => {
 
     assert.equal(mock.calls.length, 1)
     assert.equal(mock.calls[0].init.method, 'GET')
+    assert.equal(mock.calls[0].init.redirect, 'error')
     assert.deepEqual(pulled.rules, snapshot.rules)
     assert.deepEqual(pulled.history, snapshot.history)
   } finally {
@@ -266,6 +268,84 @@ test('reports a missing remote snapshot on 404', async () => {
     )
   } finally {
     mock.restore()
+  }
+})
+
+test('rejects oversized snapshots without buffering them', async () => {
+  const oversized = 'x'.repeat(10 * 1024 * 1024 + 1)
+  const mock = mockFetch(async () => new Response(oversized, { status: 200 }))
+
+  try {
+    await assert.rejects(
+      () => pullSyncSnapshot(ENDPOINT, PASSPHRASE),
+      (error: unknown) => {
+        assert.ok(error instanceof SyncRequestError)
+        assert.equal(error.kind, 'invalid-response')
+        assert.match(error.message, /larger than the supported limit/)
+        return true
+      },
+    )
+  } finally {
+    mock.restore()
+  }
+})
+
+test('rejects endpoints that redirect instead of following them', async () => {
+  // Browsers reject the request outright when `redirect: 'error'` is set, which
+  // surfaces as a generic network failure rather than a redirect.
+  const mock = mockFetch(async () => {
+    throw new TypeError('Failed to fetch')
+  })
+
+  try {
+    await assert.rejects(
+      () => pullSyncSnapshot(ENDPOINT, PASSPHRASE),
+      (error: unknown) => {
+        assert.ok(error instanceof SyncRequestError)
+        assert.equal(error.kind, 'network')
+        assert.match(error.message, /does not redirect/)
+        return true
+      },
+    )
+    assert.equal(mock.calls[0].init.redirect, 'error')
+  } finally {
+    mock.restore()
+  }
+})
+
+test('keeps the deadline active while the response body is read', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+
+  let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+  const stalledBody = new ReadableStream<Uint8Array>({
+    start(controller) {
+      streamController = controller
+    },
+  })
+
+  const mock = mockFetch(async (_url, init) => {
+    // Mirror browser behaviour: aborting the request errors the body stream.
+    init.signal?.addEventListener('abort', () => {
+      streamController?.error(new DOMException('Aborted', 'AbortError'))
+    })
+    return new Response(stalledBody, { status: 200 })
+  })
+
+  try {
+    const pending = pullSyncSnapshot(ENDPOINT, PASSPHRASE)
+
+    // Let the request reach the stalled body read before advancing the clock.
+    await new Promise((resolve) => setImmediate(resolve))
+    t.mock.timers.tick(20_000)
+
+    await assert.rejects(pending, (error: unknown) => {
+      assert.ok(error instanceof SyncRequestError)
+      assert.equal(error.kind, 'timeout')
+      return true
+    })
+  } finally {
+    mock.restore()
+    t.mock.timers.reset()
   }
 })
 

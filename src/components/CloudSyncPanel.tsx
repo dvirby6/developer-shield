@@ -12,6 +12,7 @@ import {
 } from '../services/encryption'
 import { useCloudSync, type SyncStatus } from '../hooks/useCloudSync'
 import type { CustomRule } from '../utils/customRules'
+import { confirmDestructive } from '../utils/dialog'
 import type { ScanHistoryEntry } from '../utils/history'
 import { formatRelativeTime } from '../utils/time'
 import {
@@ -128,21 +129,29 @@ export function CloudSyncPanel({
         : 'no sync yet'
 
   async function handlePush() {
-    const outcome = await push(passphrase)
-    if (outcome) setPassphrase('')
+    try {
+      await push(passphrase)
+    } finally {
+      setPassphrase('')
+      setShowPassphrase(false)
+    }
   }
 
   async function handlePull() {
     if (
-      !window.confirm(
+      !(await confirmDestructive(
         'Pull will replace local custom rules and scan history with the encrypted local snapshot. Continue?',
-      )
+      ))
     ) {
       return
     }
 
-    const outcome = await pull(passphrase)
-    if (outcome) setPassphrase('')
+    try {
+      await pull(passphrase)
+    } finally {
+      setPassphrase('')
+      setShowPassphrase(false)
+    }
   }
 
   function changeConfig(patch: Partial<Pick<SyncConfig, 'enabled' | 'endpoint'>>) {

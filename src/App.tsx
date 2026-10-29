@@ -42,6 +42,7 @@ import {
   normaliseCustomRules,
   type CustomRule,
 } from './utils/customRules'
+import { confirmDestructive } from './utils/dialog'
 import {
   inspectWorkspaceHooks,
   installPreCommitHook,
@@ -438,9 +439,13 @@ function App() {
     })
   }
 
-  function clearHistory() {
+  async function clearHistory() {
     if (history.length === 0) return
-    if (!window.confirm('Delete the local scan history? This cannot be undone.')) {
+    if (
+      !(await confirmDestructive(
+        'Delete the local scan history? This cannot be undone.',
+      ))
+    ) {
       return
     }
     setHistory([])
@@ -635,7 +640,7 @@ function App() {
                 onExportJson={(entry) => void handleExportJson(entry)}
                 onExportPdf={handleExportPdf}
                 onDelete={deleteHistoryEntry}
-                onClear={clearHistory}
+                onClear={() => void clearHistory()}
               />
             </div>
 
